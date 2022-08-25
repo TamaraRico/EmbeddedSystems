@@ -7,6 +7,7 @@
    CONDITIONS OF ANY KIND, either express or implied.
 */
 #include <stdio.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -36,6 +37,8 @@
 #define ECHO_TASK_STACK_SIZE    (CONFIG_EXAMPLE_TASK_STACK_SIZE)
 
 #define BUF_SIZE (1024)
+
+#define LED_GPIO (2)
 
 static void echo_task(void *arg)
 {
@@ -74,7 +77,69 @@ static void echo_task(void *arg)
     }
 }
 
+void myItoa(uint16_t number, char* str, uint8_t base)
+{//convierte un valor numerico en una cadena de texto
+    char *str_aux = str, n, *end_ptr, ch;
+    int i=0, j=0;
+
+    do{
+        n=number % base;
+        number=number/base;
+        n+='0';
+        if(n>'9')
+            n=n+7;
+        *(str++)=n;
+        j++;
+    }while(number>0);
+
+    *(str--)='\0';
+    
+    end_ptr = str;
+  
+    for (i = 0; i < j / 2; i++) {
+        ch = *end_ptr;
+        *end_ptr = *str_aux;
+        *str_aux = ch;
+          str_aux++;
+        end_ptr--;
+    }
+}
+
+void delayMs(uint16_t ms)
+{
+    vTaskDelay(ms/portTICK_PERIOD_MS);
+}
+
+void enviar_timestamp(void){
+    time_t seconds = time(NULL);
+}
+
+void enviar_estado_led(void){
+     uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) gpio_get_level(LED_GPIO), 1); //check for string length , number 
+}
+
+void enviar_temperatura(void){
+    int r = rand() % 20;
+    char cad[20];
+    myItoa(num, cad, 10);
+    uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) r, 1); //check for string length , number 
+}
+
+void invertir_estado_led(void){
+    gpio_set_level(LED_GPIO, !gpio_get_level(LED_GPIO));
+    delayMs(10);
+}
+
 void app_main(void)
 {
-    xTaskCreate(echo_task, "uart_echo_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
+    //xTaskCreate(echo_task, "uart_echo_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
+    while(1){
+        gpio_set_level(BLINK_GPIO, 0);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        /* Blink on (output high) */
+        printf("led low");
+        gpio_set_level(BLINK_GPIO, 1);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        printf("led high");
+    }
 }
