@@ -1,145 +1,318 @@
-/* UART Echo Example
 
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
+/*------------------ RECIBIR DATOS ------------------*/
 
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <stdio.h>
-#include <time.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "mUart.h"
 
-/**
- * This is an example which echos any data it receives on configured UART back to the sender,
- * with hardware flow control turned off. It does not use UART driver event queue.
- *
- * - Port: configured UART
- * - Receive (Rx) buffer: on
- * - Transmit (Tx) buffer: off
- * - Flow control: off
- * - Event queue: off
- * - Pin assignment: see defines below (See Kconfig)
- */
+#define UART_RX_PIN     (3)
+#define UART_TX_PIN     (1)
 
-#define ECHO_TEST_TXD (CONFIG_EXAMPLE_UART_TXD)
-#define ECHO_TEST_RXD (CONFIG_EXAMPLE_UART_RXD)
-#define ECHO_TEST_RTS (UART_PIN_NO_CHANGE)
-#define ECHO_TEST_CTS (UART_PIN_NO_CHANGE)
+#define UART_RX_PIN_2    (16)
+#define UART_TX_PIN_2    (17)
 
-#define ECHO_UART_PORT_NUM      (CONFIG_EXAMPLE_UART_PORT_NUM)
-#define ECHO_UART_BAUD_RATE     (CONFIG_EXAMPLE_UART_BAUD_RATE)
-#define ECHO_TASK_STACK_SIZE    (CONFIG_EXAMPLE_TASK_STACK_SIZE)
+#define UARTS_BAUD_RATE         (115200)
+#define TASK_STACK_SIZE         (2048)
+#define READ_BUF_SIZE           (2048)
 
-#define BUF_SIZE (1024)
-
+#define BUF_SIZE (2048)
 #define LED_GPIO (2)
 
-static void echo_task(void *arg)
-{
-    /* Configure parameters of an UART driver,
-     * communication pins and install the driver */
+#define MAX 15 //13??? 50???
+
+struct paquete{
+    uint8_t  cabecera;
+    uint8_t  comando;
+    uint8_t  longitud;
+    char     dato1;
+    char     dato2;
+    char     dato3;
+    char     dato4;
+    uint8_t  fin;
+    uint8_t  CRC32_1;
+    uint8_t  CRC32_2;
+    uint8_t  CRC32_3;
+    uint8_t  CRC32_4;
+};
+
+struct paquete* formar_paquete(uint8_t cabecera, uint8_t com, uint8_t length, char data[], uint8_t end, uint32_t crc){
+    struct paquete *p;
+    p=(struct paquete*)malloc(sizeof(struct paquete));
+    p->cabecera = cabecera;
+    p->comando = com;
+    p->longitud = length;
+    p->dato1 = data[0];
+    p->dato2 = data[1];
+    p->dato3 = data[2];
+    p->dato4 = data[3];
+    p->fin = end;
+    p->CRC32_1 =  crc & 0xff;
+    p->CRC32_2 = (crc & 0xff00)>>8;
+    p->CRC32_3 = (crc & 0xff0000)>>16;
+    p->CRC32_4 = (crc & 0xff000000)>>24;
+    return (p);
+}
+
+void UartInit(uart_port_t uart_num, uint32_t baudrate, uint8_t size, uint8_t parity, uint8_t stop, uint8_t txPin, uint8_t rxPin){
     uart_config_t uart_config = {
-        .baud_rate = ECHO_UART_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
+        .baud_rate = (int) baudrate,
+        .data_bits = (uart_word_length_t)(size-5),
+        .parity    = (uart_parity_t)parity,
+        .stop_bits = (uart_stop_bits_t)stop,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_APB,
     };
-    int intr_alloc_flags = 0;
 
-#if CONFIG_UART_ISR_IN_IRAM
-    intr_alloc_flags = ESP_INTR_FLAG_IRAM;
-#endif
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, READ_BUF_SIZE, READ_BUF_SIZE, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(uart_num, txPin, rxPin,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+}
 
-    ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
-    ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS));
+void DelayMs(uint16_t ms){
+    vTaskDelay(ms / portTICK_PERIOD_MS);
+}
 
-    // Configure a temporary buffer for the incoming data
-    uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
+void UartPutchar(uart_port_t uart_num, char c){
+    uart_write_bytes(uart_num, &c, sizeof(c));
+}
 
-    while (1) {
-        // Read data from the UART
-        int len = uart_read_bytes(ECHO_UART_PORT_NUM, data, BUF_SIZE, 20 / portTICK_RATE_MS);
-        // Write data back to the UART
-        uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) data, len);
-        if(len){
-            data[len] = '\0';
-            ESP_LOGI("TAG", "Recv str: %s", (char*)data);
-        }
+char UartGetchar(uart_port_t uart_num){
+    char c;
+    uart_read_bytes(uart_num, &c, sizeof(c), 0);
+    return c;
+} 
+
+void UartPuts(uart_port_t uart_num, char *str){
+    while(*str!='\0'){   
+        UartPutchar(uart_num,*(str++));
     }
 }
 
-void myItoa(uint16_t number, char* str, uint8_t base)
-{//convierte un valor numerico en una cadena de texto
+void UartGets(uart_port_t uart_num, char *str){
+    uint8_t cad=50;
+    char c;
+    const char *in=str;
+    int i = 0;
+
+    c=UartGetchar(uart_num);
+    while (i < 50) {
+        if (c == '\n'){
+            break;
+        }
+        if(str < (in + cad - 1)){
+            *str = c;
+            str++;
+        }
+        c=UartGetchar(uart_num);
+        i++;
+    }
+    *str = 0;
+    str -= i;
+}
+
+
+void myItoa(uint16_t number, char* str, uint8_t base){
+    //convierte un valor numerico en una cadena de texto
     char *str_aux = str, n, *end_ptr, ch;
     int i=0, j=0;
 
     do{
         n=number % base;
-        number=number/base;
-        n+='0';
-        if(n>'9')
-            n=n+7;
+        number /= base;
+        n += '0';
+        if(n >'9')
+            n += 7;
         *(str++)=n;
         j++;
     }while(number>0);
 
     *(str--)='\0';
-    
     end_ptr = str;
   
     for (i = 0; i < j / 2; i++) {
         ch = *end_ptr;
-        *end_ptr = *str_aux;
-        *str_aux = ch;
-          str_aux++;
-        end_ptr--;
+        *(end_ptr--) = *str_aux;
+        *(str_aux++) = ch;
     }
 }
 
-void delayMs(uint16_t ms)
-{
-    vTaskDelay(ms/portTICK_PERIOD_MS);
+uint16_t myAtoi(char *str){
+    uint16_t res = 0;
+    while(*str){
+        if((*str >= 48) && (*str <= 57)){
+            res *= 10;
+            res += *(str++)-48;
+        }
+        else
+            break;
+    }
+    return res;
 }
 
-void enviar_timestamp(void){
-    time_t seconds = time(NULL);
+#define CABECERA 0x5A
+#define FIN 0xB2
+
+uint32_t crc32b(char *message) {
+   int i, j;
+   unsigned int byte, crc, mask;
+   i = 0;
+   crc = 0xFFFFFFFF;
+   while (message[i]) {
+      byte = message[i];            // Get next byte.
+      crc = crc ^ byte;
+      for (j = 7; j >= 0; j--) {    // Do eight times.
+         mask = -(crc & 1);
+         crc = (crc >> 1) ^ (0xEDB88320 & mask);
+      }
+      i++; 
+   }
+   return ~crc;
 }
 
-void enviar_estado_led(void){
-     uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) gpio_get_level(LED_GPIO), 1); //check for string length , number 
+void preprocessing_string_for_crc32(char *str, char *datos, uint8_t comando){
+    *str = CABECERA;
+    *(++str) = comando;
+    *(++str) = strlen(datos) + '0';    
+    while(*datos){
+        *(++str) = *(datos++);
+    }
+    *(++str) = FIN;
+    *(++str) = 0;
 }
 
-void enviar_temperatura(void){
-    int r = rand() % 20;
-    char cad[20];
-    myItoa(num, cad, 10);
-    uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) r, 1); //check for string length , number 
+uint8_t package_validation(char *str, char *datos, char *comando){
+    int contador=0, data_length=0;
+    uint32_t crc_recibido = 0, crc_calculado;
+    char crc32_aux[13]; //MAX
+    if (str[0] != CABECERA){ 
+        return 0;
+    }else{ //COMANDO
+        if (str[1] != 0x10 && str[1] != 0x11 && str[1] != 0x12 && str[1] != 0x13){
+            return 0;
+        } else { //LONGITUD
+            if (str[2] != '0') {
+                data_length =  str[2] - '0'; 
+                //DATOS
+                while (contador < data_length){
+                    datos[contador] = str[contador+3];
+                    contador++;
+                }
+                datos[contador] = '\0';
+                contador = 0;
+            } else{
+                data_length = 1;
+            }
+            if (str[data_length+3] != FIN){
+                return 0;
+            }else{
+                crc_recibido |= (str[data_length+4] | str[data_length+5] << 8 | str[data_length+6] << 16  | str[data_length+7] << 24);
+                preprocessing_string_for_crc32(crc32_aux, datos, str[1]);
+                crc_calculado = crc32b(crc32_aux);
+                if(crc_recibido!=crc_calculado){
+                    return 0;
+                }
+            }
+        }
+    }
+    myItoa(str[1], comando, 16);
+    return 1;
 }
 
-void invertir_estado_led(void){
-    gpio_set_level(LED_GPIO, !gpio_get_level(LED_GPIO));
-    delayMs(10);
+#define DEFAULT_COMMAND 0x30 // '0'
+#define DEFAULT_LENGTH 0x34  // '4'
+#define DEFAULT_DATA "0000"
+void enviar_paquete(char *str, uint8_t longitud){
+    struct paquete * p;
+    char string_for_crc32b[MAX];
+    preprocessing_string_for_crc32(string_for_crc32b, str, DEFAULT_COMMAND);
+    uint32_t crc = crc32b(string_for_crc32b);
+    p = formar_paquete(CABECERA, DEFAULT_COMMAND, longitud, str, FIN, crc);
+    UartPuts(2, p); 
 }
 
-void app_main(void)
-{
-    //xTaskCreate(echo_task, "uart_echo_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
-    while(1){
-        gpio_set_level(BLINK_GPIO, 0);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        /* Blink on (output high) */
-        printf("led low");
-        gpio_set_level(BLINK_GPIO, 1);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        printf("led high");
+//-----------------Reactive behavior-----------------
+#define TIMESTAMP_LEN 5
+void enviar_timestamp(){
+    char str[TIMESTAMP_LEN];
+    sprintf(str, "%d\n", xTaskGetTickCount());
+    //si esto no funciona:
+    //int timestamp = (rand() % (9999 - 1000 + 1)) + 1000; valor de 4 digitos #DEFINE
+    //char cad_for_timestamp[TIMESTAMP_LEN];
+    //myItoa(timestamp, cad_for_timestamp, 10);
+    //printf("\nTimestamp : %s\n", str);
+    enviar_paquete(str, DEFAULT_LENGTH);
+}
+
+#define MAX_LENGTH_FOR_DATA 5
+void enviar_estado_led(){
+    gpio_set_direction(LED_GPIO, GPIO_MODE_INPUT_OUTPUT);
+    int led = gpio_get_level(LED_GPIO);
+    char led_state = led + '0';
+    char led_char[MAX_LENGTH_FOR_DATA] = "000";
+    led_char[3]=led_state;
+    //printf("\nLed state : %s\n", led_char);
+    enviar_paquete(led_char, DEFAULT_LENGTH);
+}
+
+#define TEMPERATURA_MAX 100
+#define TEMPERATURA_MIN 3
+void enviar_temperatura(){
+    int num = (rand() % (TEMPERATURA_MAX - TEMPERATURA_MIN + 1)) + TEMPERATURA_MIN;
+    char cadena[MAX_LENGTH_FOR_DATA]=DEFAULT_DATA, cad_aux[3];
+    myItoa(num, cad_aux, 10);
+    int len = strlen(cad_aux);
+    if(len == 2) {//puede que haya una mejor forma de hacer esto
+        cadena[2] = cad_aux[0];
+        cadena[3] = cad_aux[1];
+    } else if(len == 1 ){
+        cadena[3] = cad_aux[0];
+    }
+    //printf("\n%c %c %c %c   %d \n", cadena[0], cadena[1], cadena[2], cadena[3], len);
+    enviar_paquete(cadena, len + '0');
+}
+
+void invertir_estado_led(){
+    static uint8_t led_state=1;
+    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(LED_GPIO, led_state);
+    enviar_paquete(DEFAULT_DATA, DEFAULT_LENGTH);
+    led_state=!led_state;
+} 
+
+void app_main(void){
+
+    char paquete[13], datos[5], comando[5];
+    
+    UartInit(0, UARTS_BAUD_RATE, 8, 0, 1, UART_TX_PIN,   UART_RX_PIN);
+    UartInit(2, UARTS_BAUD_RATE, 8, 0, 1, UART_TX_PIN_2, UART_RX_PIN_2);
+
+    while(1) 
+    {
+        UartGets(2, paquete);
+
+        if(package_validation(paquete, datos, comando)){
+            printf("\nComando: %s\n", comando);
+            printf("paquete recibido!!\n");
+            if(!strcmp(comando, "10")){
+                enviar_timestamp();
+            }else if(!strcmp(comando, "11")){
+                enviar_estado_led();
+            }else if(!strcmp(comando, "12")){
+                enviar_temperatura();
+            }else if(!strcmp(comando, "13")){
+                invertir_estado_led();
+            }
+        } else {
+            printf("paquete malformado\n");
+            enviar_paquete(DEFAULT_DATA, 0x30); //'0'//puede que este sea el problema 
+        }
+        DelayMs(5000); 
     }
 }
