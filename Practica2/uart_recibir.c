@@ -1,6 +1,6 @@
 
 /*------------------ RECIBIR DATOS ------------------*/
-/*
+
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -315,11 +315,11 @@ void app_main(void){
         }
         DelayMs(5000); 
     }
-}*/
+}
 
 
 /*-------------TRANSMITIR DATOS-------------*/
-
+/*
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -595,4 +595,4 @@ void app_main(void){
 
         DelayMs(5000);
     }
-} 
+} */
